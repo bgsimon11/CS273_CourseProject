@@ -1,0 +1,83 @@
+Rscript -e "rmarkdown::render('Inference.Rmd')"
+
+**Optional primary_site**
+"Adipose Tissue"             "Muscle"                     "Blood Vessel"               "Heart"                      "Ovary"                     
+"Uterus"                     "Breast"                     "Salivary Gland"             "Brain"                      "Adrenal Gland"             
+"Thyroid"                    "Lung"                       "Pancreas"                   "Esophagus"                  "Stomach"                   
+"Skin"                       "Colon"                      "Small Intestine"            "Prostate"                   "Testis"                    
+"Nerve"                      "Spleen"                     "Pituitary"                  "Blood"                      "Vagina"                    
+"Liver"                      "Kidney"                     "Bladder"                    "Fallopian Tube"             "Cervix Uteri"              
+"Bone Marrow"                "White blood cell"           "Sympathetic Nervous System" "Endometrium"                "Cervix"                    
+"Soft tissue,Bone"           "Thymus"                     "Lining of body cavities"    "Bile duct"                  "Thyroid Gland"             
+"Head and Neck region"       "Rectum"                     "Lymphatic tissue"           "Adrenal gland"              "Paraganglia"               
+"Eye"
+
+**Optional sample_type**
+"Normal Tissue"                                     "Cell Line"                                        
+"Primary Blood Derived Cancer - Peripheral Blood"   "Primary Blood Derived Cancer - Bone Marrow"       
+"Recurrent Blood Derived Cancer - Bone Marrow"      "Recurrent Blood Derived Cancer - Peripheral Blood"
+"Post treatment Blood Cancer - Bone Marrow"         "Post treatment Blood Cancer - Blood"              
+"Primary Solid Tumor"                               "Recurrent Solid Tumor"                            
+"Solid Tissue Normal"                               "Metastatic"                                       
+"Primary Tumor"                                     "Recurrent Tumor"                                  
+"Additional - New Primary"                          "Additional Metastatic"  
+
+```{r}
+num_samples = 100L # How many samples do you want to generate
+primary_site = "Breast"
+sample_type = "Primary Tumor"
+```
+
+Load packages
+```{r}
+library(keras)
+library(abind)
+library(tensorflow)
+library(Rtsne)
+library(ggplot2)
+library(magrittr)
+load("other.Rdata")
+generator <- load_model_tf("generator")
+```
+
+```{r}
+text_vectorization <- layer_text_vectorization(max_tokens = max_tokens + 2, # 2 contain "" and "[UNK]"
+                                               standardize = NULL,
+                                               split = function(x){tf$strings$split(x, sep = "/")},
+                                               output_mode = "int",
+                                               output_sequence_length = 2,
+                                               name = "text_vectorization")
+text_vectorization$set_vocabulary(vocabulary)
+  
+denormalize <- function(samples){
+  max <- tf$expand_dims(max, axis = 0L)
+  min <- tf$expand_dims(min, axis = 0L)
+  samples <- samples * (max - min) + min
+  sum <- tf$reduce_sum(samples, axis = -1L, keepdims = T)
+  samples <- samples / sum * library_size
+  return(samples)
+}
+
+label2index <- function(samples_labels){
+  samples_labels <- tf$strings$join(list(samples_labels$primary_site, samples_labels$sample_type), separator="/")
+  samples_labels <- text_vectorization(samples_labels)
+  return(samples_labels)
+}
+
+generate = function(num_samples, samples_labels){
+  c(primary_site, sample_type) %<-% samples_labels
+  samples_labels <- data.frame(primary_site=rep(primary_site, num_samples), sample_type=rep(sample_type, num_samples))
+  samples_labels <- label2index(samples_labels)
+  
+  noise <- tf$random$normal(shape = c(as.integer(num_samples), 128L))
+  generated_samples <- generator$predict(list(noise, samples_labels))
+  generated_samples <- denormalize(generated_samples) %>% as.array()
+  colnames(generated_samples) <- Ensembl_ID
+  return(generated_samples)
+}
+```
+
+```{r}
+generated_samples <- generate(num_samples = num_samples, samples_labels = list(primary_site, sample_type))
+save(generated_samples, file = "generated_samples.Rdata")
+```
