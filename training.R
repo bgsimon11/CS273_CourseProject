@@ -515,33 +515,29 @@ wgan_gp <- new_model_class(
   results
   },
   
-  test_step = function(test_data){
-    c(real_samples, samples_labels) %<-% test_data
-    batch_size <- tf$shape(real_samples)[1]
-    real_samples <- self$normalizer(real_samples)
-    samples_labels <- self$label2index(samples_labels)
-    
-    noise <- tf$random$normal(shape = c(batch_size, latent_dim))
-    
-    ### Here add in real pre treatment latent vectors - TEST SAMPLE
-    
-    
-    
-    #generate samples and test
-    fake_samples <- self$generator(list(noise, samples_labels), training = FALSE) %>% 
-      self$denormalize() %>% # to TPM
-      self$normalizer() # to min-max
-    fake_logits <- self$discriminator(list(fake_samples, samples_labels), training = FALSE)
-    real_logits <- self$discriminator(list(real_samples, samples_labels), training = FALSE)
-    d_loss <- self$d_loss_fn(real_samp = real_logits, fake_samp = fake_logits)
-    g_loss <- self$g_loss_fn(fake_samp = fake_logits)
-    
-    self$d_loss_tracker$update_state(d_loss)
-    self$g_loss_tracker$update_state(g_loss)
-    results <- list()
-    for (m in self$metrics)
-      results[[m$name]] <- m$result()
-    results
+  test_step <- function(test_data) {
+  c(real_samples, samples_labels, pre_treatment_rna_samples) %<-% test_data
+  batch_size <- tf$shape(real_samples)[1]
+  real_samples <- self$normalizer(real_samples)
+  samples_labels <- self$label2index(samples_labels)
+  pre_treatment_rna_samples <- self$normalizer(pre_treatment_rna_samples)
+  
+  noise <- tf$random$normal(shape = c(batch_size, latent_dim))
+  # Generate samples and test
+  fake_samples <- self$generator(list(noise, samples_labels, pre_treatment_rna_samples), training = FALSE) %>% 
+    self$denormalize() %>% # to TPM
+    self$normalizer() # to min-max
+  fake_logits <- self$discriminator(list(fake_samples, samples_labels, pre_treatment_rna_samples), training = FALSE)
+  real_logits <- self$discriminator(list(real_samples, samples_labels, pre_treatment_rna_samples), training = FALSE)
+  d_loss <- self$d_loss_fn(real_samp = real_logits, fake_samp = fake_logits)
+  g_loss <- self$g_loss_fn(fake_samp = fake_logits)
+  
+  self$d_loss_tracker$update_state(d_loss)
+  self$g_loss_tracker$update_state(g_loss)
+  results <- list()
+  for (m in self$metrics)
+    results[[m$name]] <- m$result()
+  results
   }
 )
 
