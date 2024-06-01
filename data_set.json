@@ -1,0 +1,5 @@
+{
+    "values": "pre_treatment_rna.tsv.gz",
+    "labels": "cell_types.tsv",
+    "format": "matrix_fbe"
+ }
