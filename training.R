@@ -153,18 +153,23 @@ ResidualBlock_D <- function(x, width, dropout_rate){
 #print("done 4")
 
 #Build gen
-build_generator <- function(){
+build_generator <- function() {
   input <- layer_input(shape = c(latent_dim), name = "input")
   cls_input <- layer_input(shape = c(2), name = "cls_input", dtype = "int64")
+  pre_treatment_rna_input <- layer_input(shape = c(n_genes), name = "pre_treatment_rna_input")
   
   cls_emb <- cls_input %>% 
-    layer_embedding(input_dim = max_tokens + 2, output_dim = embedding_dim, input_length = 2 ,mask_zero = F) %>% 
+    layer_embedding(input_dim = max_tokens + 2, output_dim = embedding_dim, input_length = 2, mask_zero = FALSE, trainable = TRUE) %>% 
     layer_flatten() %>% 
-    layer_dense(unit = embedding_dim * 2) %>% 
+    layer_dense(units = embedding_dim * 2) %>% 
     layer_activation(activation = activation) %>% 
-    layer_dense(unit = latent_dim, name = "cls_emb")
+    layer_dense(units = latent_dim, name = "cls_emb")
+  
+  pre_treatment_rna_emb <- pre_treatment_rna_input %>% 
+    layer_dense(units = latent_dim, activation = "relu", trainable = TRUE)
   
   backbone_in <- tf$math$multiply(input, cls_emb)
+  backbone_in <- tf$math$multiply(backbone_in, pre_treatment_rna_emb)
   
   backbone_out <- backbone_in %>%
     layer_dense(units = widths[1]) %>% 
@@ -177,36 +182,42 @@ build_generator <- function(){
     layer_activation(activation = activation) %>% 
     layer_dense(units = n_genes, activation = "sigmoid")
 
-  generator_model <- keras_model(list(input, cls_input), output, name = "generator")
+  generator_model <- keras_model(list(input, cls_input, pre_treatment_rna_input), output, name = "generator")
   return(generator_model)
 }
+
 
 #print("done 5")
 
 #Build disc
-build_discriminator <- function(){
+build_discriminator <- function() {
   input <- layer_input(shape = c(n_genes), name = "input")
   cls_input <- layer_input(shape = c(2), name = "cls_input", dtype = "int64")
+  pre_treatment_rna_input <- layer_input(shape = c(n_genes), name = "pre_treatment_rna_input")
   
   cls_emb <- cls_input %>% 
-    layer_embedding(input_dim = max_tokens + 2, output_dim = embedding_dim, input_length = 2, mask_zero = F) %>% 
+    layer_embedding(input_dim = max_tokens + 2, output_dim = embedding_dim, input_length = 2, mask_zero = FALSE, trainable = TRUE) %>% 
     layer_flatten(name = "cls_emb")
   
-  backbone_in <- layer_concatenate(input, cls_emb)
+  pre_treatment_rna_emb <- pre_treatment_rna_input %>% 
+    layer_dense(units = latent_dim, activation = "relu", trainable = TRUE)
+  
+  backbone_in <- layer_concatenate(list(input, cls_emb, pre_treatment_rna_emb))
   
   backbone_out <- backbone_in %>%
     layer_dense(units = widths[3]) %>%
     ResidualBlock_D(width = widths[3], dropout_rate = dropout_rate) %>%
-    ResidualBlock_D(width = widths[2], dropout_rate = dropout_rate) %>% 
+    ResidualBlock_D(width = widths[2], dropout_rate = dropout_rate) %>%
     ResidualBlock_D(width = widths[1], dropout_rate = dropout_rate)
     
-  output <- backbone_out %>% 
+  output <- backbone_out %>%
     layer_activation(activation = activation) %>%
     layer_dense(units = 1)
   
-  discriminator_model <- keras_model(list(input, cls_input), output, name = "discriminator")
+  discriminator_model <- keras_model(list(input, cls_input, pre_treatment_rna_input), output, name = "discriminator")
   return(discriminator_model)
 }
+
 
 #print("done 6")
 
@@ -438,94 +449,70 @@ wgan_gp <- new_model_class(
     return(generated_samples)
   },
   
-  train_step = function(train_data){
-    c(real_samples, samples_labels) %<-% train_data
-    batch_size <- tf$shape(real_samples)[1]
-    real_samples <- self$normalizer(real_samples)
-    samples_labels <- self$label2index(samples_labels)
-    
-    #tf$print("Real samples shape:", tf$shape(real_samples))
-    #tf$print("Samples labels shape:", tf$shape(samples_labels))
+  train_step <- function(train_data) {
+  c(real_samples, samples_labels, pre_treatment_rna_samples) %<-% train_data
+  batch_size <- tf$shape(real_samples)[1]
+  real_samples <- self$normalizer(real_samples)
+  samples_labels <- self$label2index(samples_labels)
+  pre_treatment_rna_samples <- self$normalizer(pre_treatment_rna_samples)
   
-    # Train discriminator
-    for(i in 1:self$d_steps){
-      noise <- tf$random$normal(shape = c(batch_size, latent_dim))
-      
-      ### Here add in real pre treatment latent vectors
-      
-      
-      with(tf$GradientTape() %as% tape, {
-        # Generate fake samples from the latent vector
-        fake_samples <- self$generator(list(noise, samples_labels), training = TRUE) %>% 
-          self$denormalize() %>% # to TPM
-          self$normalizer() # to min-max
-          
-        #tf$print("Fake samples shape:", tf$shape(fake_samples))
-        
-        # Get the logits for the fake samples
-        fake_logits <- self$discriminator(list(fake_samples, samples_labels), training = TRUE)
-        # Get the logits for the real samples
-        real_logits <- self$discriminator(list(real_samples, samples_labels), training = TRUE)
-        
-        #tf$print("Fake logits shape:", tf$shape(fake_logits))
-        #tf$print("Real logits shape:", tf$shape(real_logits))
-
-        # Calculate the discriminator loss using the fake and real samples logits
-        d_cost <- self$d_loss_fn(real_samp = real_logits, fake_samp = fake_logits)
-        # Calculate the gradient penalty
-        gp <- self$gradient_penalty(real_samples, fake_samples, samples_labels)
-        # Add the gradient penalty to the original discriminator loss
-        d_loss <- d_cost + gp * self$gp_weight
-      })
-      d_gradient <- tape$gradient(d_loss, self$discriminator$trainable_variables)
-      # Update the weights of the discriminator using the discriminator optimizer
-      self$d_optimizer$apply_gradients(
-        zip_lists(d_gradient, self$discriminator$trainable_variables)
-      )
-    }
-    
-    # Train the generator
+  # Train discriminator
+  for(i in 1:self$d_steps) {
     noise <- tf$random$normal(shape = c(batch_size, latent_dim))
-    
-    ### Here add in real pre treatment latent vectors
-    
-    
-    
     with(tf$GradientTape() %as% tape, {
-      # Generate fake samples using the generator
-      generated_samples <- self$generator(list(noise, samples_labels), training = TRUE) %>% 
+      # Generate fake samples from the latent vector
+      fake_samples <- self$generator(list(noise, samples_labels, pre_treatment_rna_samples), training = TRUE) %>% 
         self$denormalize() %>% # to TPM
         self$normalizer() # to min-max
-        
-      #tf$print("Generated samples shape:", tf$shape(generated_samples))
-      
-      # Get the discriminator logits for fake samples
-      gen_samp_logits <- self$discriminator(list(generated_samples, samples_labels), training = TRUE)
-      
-      #tf$print("Generated sample logits shape:", tf$shape(gen_samp_logits))
-      
-      
-      # Calculate the generator loss
-      g_loss <- self$g_loss_fn(gen_samp_logits) 
+      # Get the logits for the fake samples
+      fake_logits <- self$discriminator(list(fake_samples, samples_labels, pre_treatment_rna_samples), training = TRUE)
+      # Get the logits for the real samples
+      real_logits <- self$discriminator(list(real_samples, samples_labels, pre_treatment_rna_samples), training = TRUE)
+
+      # Calculate the discriminator loss using the fake and real samples logits
+      d_cost <- self$d_loss_fn(real_samp = real_logits, fake_samp = fake_logits)
+      # Calculate the gradient penalty
+      gp <- self$gradient_penalty(real_samples, fake_samples, samples_labels)
+      # Add the gradient penalty to the original discriminator loss
+      d_loss <- d_cost + gp * self$gp_weight
     })
-    # Get the gradients w.r.t the generator  
-    gen_gradient <- tape$gradient(g_loss, self$generator$trainable_variables)
-    # Update the weights of the generator using the generator optimizer
-    self$g_optimizer$apply_gradients(
-      zip_lists(gen_gradient, self$generator$trainable_variables)
+    d_gradient <- tape$gradient(d_loss, self$discriminator$trainable_variables)
+    # Update the weights of the discriminator using the discriminator optimizer
+    self$d_optimizer$apply_gradients(
+      zip_lists(d_gradient, self$discriminator$trainable_variables)
     )
-    
-    #ema
-    for(w in zip_lists(self$generator$weights,self$ema_generator$weights)){
-      w[[2]]$assign(ema * w[[2]] + (1 - ema) * w[[1]])
-    }
-    
-    self$d_loss_tracker$update_state(d_cost)
-    self$g_loss_tracker$update_state(g_loss)
-    results <- list()
-    for (m in self$metrics)
-      results[[m$name]] <- m$result()
-    results
+  }
+  
+  # Train the generator
+  noise <- tf$random$normal(shape = c(batch_size, latent_dim))
+  with(tf$GradientTape() %as% tape, {
+    # Generate fake samples using the generator
+    generated_samples <- self$generator(list(noise, samples_labels, pre_treatment_rna_samples), training = TRUE) %>% 
+      self$denormalize() %>% # to TPM
+      self$normalizer() # to min-max
+    # Get the discriminator logits for fake samples
+    gen_samp_logits <- self$discriminator(list(generated_samples, samples_labels, pre_treatment_rna_samples), training = TRUE)
+    # Calculate the generator loss
+    g_loss <- self$g_loss_fn(gen_samp_logits) 
+  })
+  # Get the gradients w.r.t the generator  
+  gen_gradient <- tape$gradient(g_loss, self$generator$trainable_variables)
+  # Update the weights of the generator using the generator optimizer
+  self$g_optimizer$apply_gradients(
+    zip_lists(gen_gradient, self$generator$trainable_variables)
+  )
+  
+  # EMA
+  for(w in zip_lists(self$generator$weights, self$ema_generator$weights)) {
+    w[[2]]$assign(self$ema * w[[2]] + (1 - self$ema) * w[[1]])
+  }
+  
+  self$d_loss_tracker$update_state(d_cost)
+  self$g_loss_tracker$update_state(g_loss)
+  results <- list()
+  for (m in self$metrics)
+    results[[m$name]] <- m$result()
+  results
   },
   
   test_step = function(test_data){
